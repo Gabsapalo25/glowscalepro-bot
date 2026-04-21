@@ -15,8 +15,8 @@ CONFIGURAÇÃO NECESSÁRIA (linhas marcadas com CONFIG):
 """
 
 import logging
+import os
 import smtplib
-import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
@@ -32,15 +32,15 @@ from telegram.ext import (
 )
 
 # ─────────────────────────────────────────────
-# CONFIG — preenche estas variáveis
+# CONFIG — lido das variáveis de ambiente do Railway
 # ─────────────────────────────────────────────
 
-BOT_TOKEN       = "7412963580:AAF3kzX9mNpQrT8vWcLdYjE2sHbU1oKnVgI"  # CONFIG
-ADMIN_CHAT_ID   = 8654527617                                           # CONFIG
-WALLET_ADDRESS  = "0xed170267879a7ebb374134ea9b385bc7114856b6"         # CONFIG
-EMAIL_SENDER    = "glowscalepro@gmail.com"                             # CONFIG
-EMAIL_PASSWORD  = "ggtvamuyatpmrasz"                                   # CONFIG
-PDF_PATH        = "notion_elite_starter_kit_2026.pdf"                  # CONFIG
+BOT_TOKEN       = os.environ.get("BOT_TOKEN", "")
+ADMIN_CHAT_ID   = int(os.environ.get("ADMIN_CHAT_ID", "8654527617"))
+WALLET_ADDRESS  = os.environ.get("WALLET_ADDRESS", "0xed170267879a7ebb374134ea9b385bc7114856b6")
+EMAIL_SENDER    = os.environ.get("EMAIL_SENDER", "glowscalepro@gmail.com")
+EMAIL_PASSWORD  = os.environ.get("EMAIL_PASSWORD", "ggtvamuyatpmrasz")
+PDF_PATH        = os.environ.get("PDF_PATH", "notion_elite_starter_kit_2026.pdf")
 
 PRODUCT_NAME    = "Notion Elite Starter Kit 2026"
 PRODUCT_PRICE   = 49  # USD
