@@ -35,7 +35,7 @@ from telegram.ext import (
 # CONFIG — lido das variáveis de ambiente do Railway
 # ─────────────────────────────────────────────
 
-BOT_TOKEN       = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN       = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_CHAT_ID   = int(os.environ.get("ADMIN_CHAT_ID", "8654527617"))
 WALLET_ADDRESS  = os.environ.get("WALLET_ADDRESS", "0xed170267879a7ebb374134ea9b385bc7114856b6")
 EMAIL_SENDER    = os.environ.get("EMAIL_SENDER", "glowscalepro@gmail.com")
@@ -397,7 +397,9 @@ GlowScalePro — glowscalepro.com
 # ─────────────────────────────────────────────
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    token_limpo = BOT_TOKEN.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+    logger.info(f"TOKEN DEBUG: {repr(token_limpo)}")
+    app = Application.builder().token(token_limpo).build()
 
     # Comandos
     app.add_handler(CommandHandler("start", start))
