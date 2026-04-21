@@ -11,6 +11,7 @@ VARIÁVEIS DE AMBIENTE (configurar no Railway):
 - WALLET_ADDRESS
 - EMAIL_SENDER
 - EMAIL_PASSWORD
+- BSCSCAN_API_KEY  (NOVA: para validação automática)
 """
 
 import logging
@@ -30,6 +31,9 @@ from telegram.ext import (
     filters,
 )
 
+# NOVA dependência para chamadas API
+import aiohttp
+
 # ─────────────────────────────────────────────
 # VARIÁVEIS DE AMBIENTE
 # ─────────────────────────────────────────────
@@ -39,6 +43,7 @@ ADMIN_CHAT_ID  = int(os.environ.get("ADMIN_CHAT_ID", "8654527617"))
 WALLET_ADDRESS = os.environ.get("WALLET_ADDRESS", "0xed170267879a7ebb374134ea9b385bc7114856b6").strip()
 EMAIL_SENDER   = os.environ.get("EMAIL_SENDER", "glowscalepro@gmail.com").strip()
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "ggtvamuyatpmrasz").strip()
+BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY", "").strip()  # NOVA: API Key da BSCScan
 NETWORK_NAME   = "BEP-20 (BNB Smart Chain)"
 
 # ─────────────────────────────────────────────
@@ -180,6 +185,69 @@ def construir_instrucoes_pagamento(pid):
     )
 
 # ─────────────────────────────────────────────
+# VALIDAÇÃO AUTOMÁTICA DE PAGAMENTO (NOVA)
+# ─────────────────────────────────────────────
+
+async def verificar_pagamento_bscscan(tx_hash: str, valor_esperado_usdt: float) -> dict:
+    """
+    Verifica se uma transação BSC é válida e se o valor está correcto.
+    Retorna: {'success': bool, 'message': str, 'valor': float (opcional)}
+    """
+    if not BSCSCAN_API_KEY:
+        return {'success': False, 'message': '❌ API não configurada. Contacta o suporte.'}
+    
+    try:
+        # 1. Verifica se a transação existe e está confirmada
+        url_tx = f"https://api.bscscan.com/api?module=transaction&action=gettxreceiptstatus&txhash={tx_hash}&apikey={BSCSCAN_API_KEY}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url_tx) as resp:
+                dados = await resp.json()
+                
+                if dados.get('result', {}).get('status') != '1':
+                    return {'success': False, 'message': '❌ Transacção não encontrada ou ainda não confirmada. Aguarda 1-2 minutos e tenta novamente.'}
+        
+        # 2. Obtém detalhes da transacção (valor, de, para)
+        url_details = f"https://api.bscscan.com/api?module=account&action=tokentx&txhash={tx_hash}&apikey={BSCSCAN_API_KEY}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url_details) as resp:
+                dados = await resp.json()
+                
+                if dados.get('status') != '1' or not dados.get('result'):
+                    return {'success': False, 'message': '❌ Não foi possível obter detalhes da transacção. Tenta novamente em 30 segundos.'}
+                
+                # Pega a primeira transferência de token
+                tx = dados['result'][0]
+                
+                # Verifica se o destinatário é a nossa wallet
+                if tx.get('to', '').lower() != WALLET_ADDRESS.lower():
+                    return {'success': False, 'message': f'⚠️ A transacção foi enviada para outra carteira.\nVerifica o endereço e tenta novamente.'}
+                
+                # O valor vem em wei (18 decimais para USDT/BSC)
+                valor_raw = int(tx.get('value', '0'))
+                valor_recebido = valor_raw / 10**18
+                
+                # Verifica se o valor é suficiente (margem de 0.01 USDT)
+                if valor_recebido >= (valor_esperado_usdt - 0.01):
+                    return {
+                        'success': True, 
+                        'message': f'✅ Pagamento confirmado! Recebido: {valor_recebido:.2f} USDT',
+                        'valor': valor_recebido,
+                        'de': tx.get('from'),
+                        'para': tx.get('to')
+                    }
+                else:
+                    return {
+                        'success': False, 
+                        'message': f'⚠️ Valor incorrecto. Esperado: {valor_esperado_usdt} USDT | Enviado: {valor_recebido:.4f} USDT'
+                    }
+                    
+    except Exception as e:
+        logger.error(f"Erro ao verificar BSCScan: {e}")
+        return {'success': False, 'message': '❌ Erro ao verificar pagamento. Tenta novamente ou usa /suporte.'}
+
+# ─────────────────────────────────────────────
 # HANDLERS DE COMANDOS
 # ─────────────────────────────────────────────
 
@@ -267,7 +335,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
-# HANDLER DE MENSAGENS (TX hash + email)
+# HANDLER DE MENSAGENS (TX hash + email) - ACTUALIZADO
 # ─────────────────────────────────────────────
 
 async def mensagem_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -287,68 +355,136 @@ async def mensagem_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid    = estado.get("produto", "notion_2026")
     p      = PRODUTOS.get(pid, {})
 
-    # Passo 1: aguarda TX hash
+    # Passo 1: aguarda TX hash (COM VERIFICAÇÃO AUTOMÁTICA)
     if estado["step"] == "aguarda_tx":
         tx = texto.replace(" ", "").replace("\n", "")
+        
         if tx.startswith("0x") and len(tx) >= 60:
-            user_states[user_id]["tx_hash"] = tx
-            user_states[user_id]["step"]    = "aguarda_email"
-            await update.message.reply_text(
-                "✅ *TX Hash recebido!*\n\n"
-                "Estamos a verificar o teu pagamento.\n\n"
-                "Enquanto isso, *envia o teu email* para recebermos o produto:\n\n"
-                "_(ex: gabriel@gmail.com)_",
+            valor_esperado = p.get("preco", 0)
+            
+            # Mensagem de "a verificar"
+            msg_verificando = await update.message.reply_text(
+                "🔍 *A verificar o teu pagamento na blockchain...*\n\n"
+                f"💰 Valor esperado: *${valor_esperado} USDT*\n"
+                f"🆔 TX Hash: `{tx[:20]}...`\n\n"
+                "_Isto demora apenas alguns segundos._",
                 parse_mode="Markdown"
             )
+            
+            # VERIFICAÇÃO AUTOMÁTICA via BSCScan
+            resultado = await verificar_pagamento_bscscan(tx, valor_esperado)
+            
+            if resultado['success']:
+                # Pagamento confirmado!
+                await msg_verificando.edit_text(
+                    f"{resultado['message']}\n\n"
+                    f"✅ *Pagamento confirmado com sucesso!*\n\n"
+                    f"Agora envia o teu *email* para receberes o produto:\n"
+                    f"_(ex: cliente@gmail.com)_",
+                    parse_mode="Markdown"
+                )
+                
+                user_states[user_id]["tx_hash"] = tx
+                user_states[user_id]["step"] = "aguarda_email"
+                
+                # Notifica o admin (opcional, apenas para acompanhamento)
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"💰 *PAGAMENTO VERIFICADO AUTOMATICAMENTE*\n"
+                        f"✅ {p.get('nome')} - ${valor_esperado} USDT\n"
+                        f"👤 @{username} (ID: `{user_id}`)\n"
+                        f"🔗 TX: `{tx[:30]}...`\n\n"
+                        f"_O produto será enviado automaticamente após o cliente enviar o email._"
+                    ),
+                    parse_mode="Markdown"
+                )
+            else:
+                await msg_verificando.edit_text(
+                    f"{resultado['message']}\n\n"
+                    f"Se tens a certeza que fizeste o pagamento correctamente, contacta o suporte: /suporte\n\n"
+                    f"_Podes tentar enviar o TX Hash novamente._",
+                    parse_mode="Markdown"
+                )
         else:
             await update.message.reply_text(
                 "⚠️ *TX Hash inválido.*\n\n"
                 "O TX Hash deve começar por `0x` e ter pelo menos 60 caracteres.\n"
+                "Exemplo: `0x1234567890abcdef...`\n\n"
                 "Encontra-o no histórico da tua carteira após o envio.",
                 parse_mode="Markdown"
             )
 
-    # Passo 2: aguarda email
+    # Passo 2: aguarda email (ENVIO AUTOMÁTICO DO PRODUTO)
     elif estado["step"] == "aguarda_email":
         if "@" in texto and "." in texto:
             email   = texto.lower().strip()
             tx_hash = user_states[user_id]["tx_hash"]
 
             user_states[user_id]["email"] = email
-            user_states[user_id]["step"]  = "aguarda_confirmacao"
-
-            await update.message.reply_text(
-                f"⏳ *Pagamento em verificação*\n\n"
-                f"Recebemos o teu TX Hash e o teu email.\n\n"
-                f"A nossa equipa vai verificar o pagamento e enviar o produto para "
-                f"*{email}* em breve (normalmente menos de 15 minutos).\n\n"
-                f"Obrigado pela confiança! 🙏",
-                parse_mode="Markdown"
+            
+            # ENVIA O PRODUTO AUTOMATICAMENTE (sem precisar de confirmação manual)
+            sucesso = enviar_pdf_email(
+                destinatario=email,
+                produto_nome=p.get("nome", "Produto GlowScalePro"),
+                pdf_path=p.get("pdf", "")
             )
 
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=(
-                    f"🔔 *NOVA VENDA — GlowScalePro Store*\n\n"
-                    f"📦 Produto: {p.get('nome', pid)}\n"
-                    f"💰 Valor: ${p.get('preco', '?')} USDT\n"
-                    f"👤 Cliente: @{username} (ID: `{user_id}`)\n"
-                    f"📧 Email: {email}\n"
-                    f"🔗 TX Hash: `{tx_hash}`\n\n"
-                    f"Verifica em: https://bscscan.com/tx/{tx_hash}\n\n"
-                    f"Para confirmar e enviar o produto:\n"
-                    f"`/confirmar_{user_id}`"
-                ),
-                parse_mode="Markdown"
-            )
+            if sucesso:
+                await update.message.reply_text(
+                    f"🎉 *Produto enviado com sucesso!*\n\n"
+                    f"O *{p.get('nome', 'produto')}* foi enviado para *{email}*.\n\n"
+                    f"Verifica também a pasta de spam.\n\n"
+                    f"Boas leituras! 📚\n"
+                    f"— Gabriel Sapalo · GlowScalePro",
+                    parse_mode="Markdown"
+                )
+                
+                # Notifica o admin que o produto foi enviado
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"📧 *PRODUTO ENVIADO AUTOMATICAMENTE*\n"
+                        f"📦 {p.get('nome')} - ${p.get('preco')} USDT\n"
+                        f"👤 @{username} (ID: `{user_id}`)\n"
+                        f"📧 Email: {email}\n"
+                        f"🔗 TX: `{tx_hash[:30]}...`\n\n"
+                        f"_Venda concluída com sucesso!_"
+                    ),
+                    parse_mode="Markdown"
+                )
+                
+                # Limpa o estado do utilizador
+                del user_states[user_id]
+            else:
+                await update.message.reply_text(
+                    "❌ *Erro ao enviar o produto.*\n\n"
+                    "Contacta imediatamente o suporte: /suporte\n"
+                    "Já fomos notificados e vamos resolver o problema.",
+                    parse_mode="Markdown"
+                )
+                
+                # Notifica o admin do erro
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"⚠️ *ERRO NO ENVIO AUTOMÁTICO*\n"
+                        f"📦 {p.get('nome')}\n"
+                        f"👤 @{username} (ID: `{user_id}`)\n"
+                        f"📧 Email: {email}\n"
+                        f"🔗 TX: `{tx_hash}`\n\n"
+                        f"_Verificar configurações de email e enviar manualmente._"
+                    ),
+                    parse_mode="Markdown"
+                )
         else:
             await update.message.reply_text(
-                "⚠️ Email inválido. Envia um endereço válido, ex: gabriel@gmail.com"
+                "⚠️ Email inválido. Envia um endereço válido, ex: cliente@gmail.com"
             )
 
 
 # ─────────────────────────────────────────────
-# COMANDO ADMIN: /confirmar_USERID
+# COMANDO ADMIN: /confirmar_USERID (MANTIDO PARA FALHAS)
 # ─────────────────────────────────────────────
 
 async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -451,7 +587,12 @@ def enviar_pdf_email(destinatario: str, produto_nome: str, pdf_path: str) -> boo
 def main():
     token = BOT_TOKEN.strip().replace("\n","").replace("\r","").replace(" ","")
     logger.info(f"TOKEN DEBUG: {repr(token[:20])}...")
-    logger.info("Bot GlowScalePro iniciado...")
+    logger.info("Bot GlowScalePro iniciado com validação automática BSCScan...")
+    
+    if BSCSCAN_API_KEY:
+        logger.info("✅ BSCScan API configurada - validação automática activa")
+    else:
+        logger.warning("⚠️ BSCScan API NÃO configurada - modo manual apenas")
 
     app = Application.builder().token(token).build()
 
